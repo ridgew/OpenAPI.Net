@@ -21,7 +21,7 @@ namespace Samples.Shared.Services
 
         event Action Connected;
 
-        Task Connect();
+        Task Connect(ApiCredentials apiCredentials);
 
         Task<ProtoOAAccountAuthRes> AuthorizeAccount(long accountId, bool isLive, string accessToken);
 
@@ -72,18 +72,18 @@ namespace Samples.Shared.Services
     {
         private readonly Func<OpenClient> _liveClientFactory;
         private readonly Func<OpenClient> _demoClientFactory;
-        private readonly ApiCredentials _apiCredentials;
         private readonly ConcurrentQueue<MessageQueueItem> _messagesQueue = new();
         private readonly System.Timers.Timer _sendMessageTimer;
 
         private OpenClient _liveClient;
         private OpenClient _demoClient;
 
-        public OpenApiService(Func<OpenClient> liveClientFactory, Func<OpenClient> demoClientFactory, ApiCredentials apiCredentials, int maxMessagePerSecond = 45)
+        private ApiCredentials _apiCredentials;
+
+        public OpenApiService(Func<OpenClient> liveClientFactory, Func<OpenClient> demoClientFactory, int maxMessagePerSecond = 45)
         {
             _liveClientFactory = liveClientFactory ?? throw new ArgumentNullException(nameof(liveClientFactory));
             _demoClientFactory = demoClientFactory ?? throw new ArgumentNullException(nameof(demoClientFactory));
-            _apiCredentials = apiCredentials;
 
             _sendMessageTimer = new(1000.0 / maxMessagePerSecond);
 
@@ -99,8 +99,10 @@ namespace Samples.Shared.Services
 
         public event Action Connected;
 
-        public async Task Connect()
+        public async Task Connect(ApiCredentials apiCredentials)
         {
+            _apiCredentials = apiCredentials;
+
             OpenClient liveClient = null;
             OpenClient demoClient = null;
 
@@ -124,7 +126,7 @@ namespace Samples.Shared.Services
 
             _sendMessageTimer.Start();
 
-            await Task.WhenAll(AuthorizeApp(liveClient), AuthorizeApp(demoClient));
+            await Task.WhenAll(AuthorizeApp(liveClient, _apiCredentials), AuthorizeApp(demoClient, _apiCredentials));
 
             IsConnected = true;
 
@@ -152,7 +154,7 @@ namespace Samples.Shared.Services
 
             try
             {
-                await Connect();
+                await Connect(_apiCredentials);
             }
             catch
             {
@@ -162,7 +164,7 @@ namespace Samples.Shared.Services
             }
         }
 
-        private Task<ProtoOAApplicationAuthRes> AuthorizeApp(OpenClient client)
+        private Task<ProtoOAApplicationAuthRes> AuthorizeApp(OpenClient client, ApiCredentials apiCredentials)
         {
             var taskCompletionSource = new TaskCompletionSource<ProtoOAApplicationAuthRes>();
 
@@ -177,11 +179,34 @@ namespace Samples.Shared.Services
 
             var requestMessage = new ProtoOAApplicationAuthReq
             {
-                ClientId = _apiCredentials.ClientId,
-                ClientSecret = _apiCredentials.Secret,
+                ClientId = apiCredentials.ClientId,
+                ClientSecret = apiCredentials.Secret,
             };
 
             EnqueueMessage(requestMessage, ProtoOAPayloadType.ProtoOaApplicationAuthReq, client);
+
+            return taskCompletionSource.Task;
+        }
+
+        public Task<ProtoOACtidTraderAccount[]> GetAccountsList(string accessToken)
+        {
+            var taskCompletionSource = new TaskCompletionSource<ProtoOACtidTraderAccount[]>();
+
+            IDisposable disposable = null;
+
+            disposable = _demoClient.OfType<ProtoOAGetAccountListByAccessTokenRes>().Subscribe(response =>
+            {
+                taskCompletionSource.SetResult(response.CtidTraderAccount.ToArray());
+
+                disposable?.Dispose();
+            });
+
+            var requestMessage = new ProtoOAGetAccountListByAccessTokenReq
+            {
+                AccessToken = accessToken
+            };
+
+            EnqueueMessage(requestMessage, ProtoOAPayloadType.ProtoOaGetAccountsByAccessTokenReq, _demoClient);
 
             return taskCompletionSource.Task;
         }
@@ -325,11 +350,11 @@ namespace Samples.Shared.Services
 
             disposable = client.OfType<ProtoOASymbolsForConversionRes>().Where(response => response.CtidTraderAccountId == accountId)
                 .Subscribe(response =>
-            {
-                taskCompletionSource.SetResult(response.Symbol.ToArray());
+                {
+                    taskCompletionSource.SetResult(response.Symbol.ToArray());
 
-                disposable?.Dispose();
-            });
+                    disposable?.Dispose();
+                });
 
             var requestMessage = new ProtoOASymbolsForConversionReq
             {
@@ -339,29 +364,6 @@ namespace Samples.Shared.Services
             };
 
             EnqueueMessage(requestMessage, ProtoOAPayloadType.ProtoOaSymbolsForConversionReq, client);
-
-            return taskCompletionSource.Task;
-        }
-
-        public Task<ProtoOACtidTraderAccount[]> GetAccountsList(string accessToken)
-        {
-            var taskCompletionSource = new TaskCompletionSource<ProtoOACtidTraderAccount[]>();
-
-            IDisposable disposable = null;
-
-            disposable = _liveClient.OfType<ProtoOAGetAccountListByAccessTokenRes>().Subscribe(response =>
-            {
-                taskCompletionSource.SetResult(response.CtidTraderAccount.ToArray());
-
-                disposable?.Dispose();
-            });
-
-            var requestMessage = new ProtoOAGetAccountListByAccessTokenReq
-            {
-                AccessToken = accessToken
-            };
-
-            EnqueueMessage(requestMessage, ProtoOAPayloadType.ProtoOaGetAccountsByAccessTokenReq, _liveClient);
 
             return taskCompletionSource.Task;
         }
