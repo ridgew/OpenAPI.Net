@@ -29,6 +29,8 @@ namespace OpenAPI.Net
 
         private readonly CancellationTokenSource _messagesCancellationTokenSource = new CancellationTokenSource();
 
+        private readonly TimeSpan _requestDelay;
+
         private TcpClient _tcpClient;
 
         private WebsocketClient _websocketClient;
@@ -43,14 +45,16 @@ namespace OpenAPI.Net
 
         private IDisposable _webSocketMessageReceivedDisposable;
 
+
         /// <summary>
         /// Creates an instance of OpenClient which is not connected yet
         /// </summary>
         /// <param name="host">The host name of API endpoint</param>
         /// <param name="port">The host port number</param>
         /// <param name="heartbeatInerval">The time interval for sending heartbeats</param>
+        /// <param name="maxRequestPerSecond">The maximum number of requests client will send per second</param>
         /// <param name="useWebSocket">By default OpenClient uses raw TCP connection, if you want to use web socket instead set this parameter to true</param>
-        public OpenClient(string host, int port, TimeSpan heartbeatInerval, bool useWebSocket = false)
+        public OpenClient(string host, int port, TimeSpan heartbeatInerval, int maxRequestPerSecond = 40, bool useWebSocket = false)
         {
             Host = host ?? throw new ArgumentNullException(nameof(host));
 
@@ -59,6 +63,8 @@ namespace OpenAPI.Net
             Port = port;
 
             _heartbeatInerval = heartbeatInerval;
+            MaxRequestPerSecond = maxRequestPerSecond;
+            _requestDelay = TimeSpan.FromMilliseconds(1000 / MaxRequestPerSecond);
             UseWebSocket = useWebSocket;
         }
 
@@ -71,6 +77,11 @@ namespace OpenAPI.Net
         /// The API host port that current client is connected to
         /// </summary>
         public int Port { get; }
+
+        /// <summary>
+        /// The maximum number of requests client will send per second
+        /// </summary>
+        public int MaxRequestPerSecond { get; }
 
         /// <summary>
         /// If client is connected via websocket then this will return True, otherwise False
@@ -96,6 +107,11 @@ namespace OpenAPI.Net
         /// The time client sent its last message
         /// </summary>
         public DateTimeOffset LastSentMessageTime { get; private set; }
+
+        /// <summary>
+        /// The count of messages on queue to be sent
+        /// </summary>
+        public int MessagesQueueCount { get; private set; }
 
         /// <summary>
         /// Connects to the API based on you specified method (websocket or TCP)
@@ -198,7 +214,7 @@ namespace OpenAPI.Net
         {
             var protoMessage = MessageFactory.GetMessage(message, payloadType, clientMsgId);
 
-            await _messagesChannel.Writer.WriteAsync(protoMessage);
+            await SendMessage(protoMessage);
         }
 
         /// <summary>
@@ -214,7 +230,7 @@ namespace OpenAPI.Net
         {
             var protoMessage = MessageFactory.GetMessage(message, payloadType, clientMsgId);
 
-            await _messagesChannel.Writer.WriteAsync(protoMessage);
+            await SendMessage(protoMessage);
         }
 
         /// <summary>
@@ -224,6 +240,8 @@ namespace OpenAPI.Net
         /// <returns>Task</returns>
         public async Task SendMessage(ProtoMessage message)
         {
+            MessagesQueueCount += 1;
+
             await _messagesChannel.Writer.WriteAsync(message);
         }
 
@@ -240,20 +258,16 @@ namespace OpenAPI.Net
             {
                 var messageByte = message.ToByteArray();
 
-                var length = BitConverter.GetBytes(messageByte.Length);
-
-                Array.Reverse(length);
-
-                LastSentMessageTime = DateTime.Now;
-
                 if (UseWebSocket)
                 {
                     _websocketClient.Send(messageByte);
                 }
                 else
                 {
-                    await WriteTcp(messageByte, length);
+                    await WriteTcp(messageByte);
                 }
+
+                LastSentMessageTime = DateTimeOffset.Now;
             }
             catch (Exception ex)
             {
@@ -274,7 +288,16 @@ namespace OpenAPI.Net
                 {
                     while (_messagesChannel.Reader.TryRead(out var message))
                     {
+                        var timeElapsedSinceLastMessageSent = DateTimeOffset.Now - LastSentMessageTime;
+
+                        if (timeElapsedSinceLastMessageSent < _requestDelay)
+                        {
+                            await Task.Delay(_requestDelay - timeElapsedSinceLastMessageSent);
+                        }
+
                         await SendMessageInstant(message);
+
+                        if (MessagesQueueCount > 0) MessagesQueueCount -= 1;
                     }
                 }
             }
@@ -298,7 +321,12 @@ namespace OpenAPI.Net
 
             _heartbeatDisposable?.Dispose();
             _listenerDisposable?.Dispose();
+
             _messagesCancellationTokenSource.Cancel();
+
+            _messagesChannel.Writer.TryComplete();
+
+            MessagesQueueCount = 0;
 
             if (UseWebSocket)
             {
@@ -314,6 +342,8 @@ namespace OpenAPI.Net
             }
 
             if (!IsTerminated) OnCompleted();
+
+            _observers.Clear();
         }
 
         /// <summary>
@@ -372,15 +402,15 @@ namespace OpenAPI.Net
         /// <param name="messageByte"></param>
         /// <param name="length"></param>
         /// <returns>Task</returns>
-        private async Task WriteTcp(byte[] messageByte, byte[] length)
+        private async Task WriteTcp(byte[] messageByte)
         {
             ThrowObjectDisposedExceptionIfDisposed();
 
             try
             {
-                await _sslStream.WriteAsync(length, 0, length.Length).ConfigureAwait(false);
+                var data = BitConverter.GetBytes(messageByte.Length).Reverse().Concat(messageByte).ToArray();
 
-                await _sslStream.WriteAsync(messageByte, 0, messageByte.Length).ConfigureAwait(false);
+                await _sslStream.WriteAsync(data, 0, data.Length).ConfigureAwait(false);
             }
             catch (Exception ex)
             {

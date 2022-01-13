@@ -1,0 +1,25 @@
+name: Publish Nuget Package When Pre-Released
+
+on:
+  release:
+    types: [prereleased]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: '6.0.x'
+    - name: Install dependencies
+      run: dotnet restore src/OpenAPI.Net/OpenAPI.Net.csproj
+    - name: Build
+      run: dotnet build src/OpenAPI.Net/OpenAPI.Net.csproj --configuration Release --no-restore
+    - name: Publish on pre-release
+      uses: rohith/publish-nuget@v2
+      with:
+          PROJECT_FILE_PATH: src/OpenAPI.Net/OpenAPI.Net.csproj
+          NUGET_KEY: ${{secrets.NUGET_API_KEY}}
