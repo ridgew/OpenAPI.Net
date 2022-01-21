@@ -12,7 +12,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Websocket.Client;
 using System.Net.WebSockets;
-using System.Reactive.Concurrency;
 using System.Threading.Channels;
 
 namespace OpenAPI.Net
@@ -27,7 +26,7 @@ namespace OpenAPI.Net
 
         private readonly ConcurrentDictionary<int, IObserver<IMessage>> _observers = new ConcurrentDictionary<int, IObserver<IMessage>>();
 
-        private readonly CancellationTokenSource _messagesCancellationTokenSource = new CancellationTokenSource();
+        private readonly CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
 
         private readonly TimeSpan _requestDelay;
 
@@ -36,8 +35,6 @@ namespace OpenAPI.Net
         private WebsocketClient _websocketClient;
 
         private SslStream _sslStream;
-
-        private IDisposable _listenerDisposable;
 
         private IDisposable _heartbeatDisposable;
 
@@ -130,7 +127,7 @@ namespace OpenAPI.Net
                 await ConnectTcp();
             }
 
-            _ = StartSendingMessages(_messagesCancellationTokenSource.Token);
+            _ = StartSendingMessages(_cancellationTokenSource.Token);
 
             _heartbeatDisposable = Observable.Interval(_heartbeatInerval).DoWhile(() => !IsDisposed)
                 .Subscribe(x => SendHeartbeat());
@@ -181,10 +178,7 @@ namespace OpenAPI.Net
 
             await _sslStream.AuthenticateAsClientAsync(Host).ConfigureAwait(false);
 
-            _listenerDisposable = Observable.DoWhile(Observable.FromAsync(ReadTcp), () => !IsDisposed)
-                .Where(message => message != null)
-                .ObserveOn(TaskPoolScheduler.Default)
-                .Subscribe(OnNext);
+            _ = ReadTcp(_cancellationTokenSource.Token);
         }
 
         /// <summary>
@@ -199,6 +193,24 @@ namespace OpenAPI.Net
             _observers.AddOrUpdate(observer.GetHashCode(), observer, (key, oldObserver) => observer);
 
             return Disposable.Create(() => OnObserverDispose(observer));
+        }
+
+        /// <summary>
+        /// This method will insert your message on messages queue, it will not send the message instantly
+        /// By using this overload of SendMessage method you avoid passing the message payload type
+        /// and it gets the payload from message itself
+        /// </summary>
+        /// <typeparam name="T">Message Type</typeparam>
+        /// <param name="message">Message</param>
+        /// <param name="clientMsgId">The client message ID (optional)</param>
+        /// <exception cref="InvalidOperationException">If getting message payload type fails</exception>
+        /// <returns>Task</returns>
+        public async Task SendMessage<T>(T message, string clientMsgId = null) where T :
+            IMessage
+        {
+            var protoMessage = MessageFactory.GetMessage(message.GetPayloadType(), message.ToByteString(), clientMsgId);
+            
+            await SendMessage(protoMessage);
         }
 
         /// <summary>
@@ -320,9 +332,8 @@ namespace OpenAPI.Net
             IsDisposed = true;
 
             _heartbeatDisposable?.Dispose();
-            _listenerDisposable?.Dispose();
 
-            _messagesCancellationTokenSource.Cancel();
+            _cancellationTokenSource.Cancel();
 
             _messagesChannel.Writer.TryComplete();
 
@@ -342,49 +353,55 @@ namespace OpenAPI.Net
             }
 
             if (!IsTerminated) OnCompleted();
-
-            _observers.Clear();
         }
 
         /// <summary>
         /// This method will read the TCP stream for incoming messages
         /// </summary>
-        /// <returns>Task<ProtoMessage></returns>
-        private async Task<ProtoMessage> ReadTcp()
+        /// <returns>Task</returns>
+        private async Task ReadTcp(CancellationToken cancellationToken)
         {
             try
             {
-                var lengthArray = new byte[sizeof(int)];
-
-                var readBytes = 0;
-
-                do
+                while (!IsDisposed)
                 {
-                    var count = lengthArray.Length - readBytes;
+                    var lengthArray = new byte[sizeof(int)];
 
-                    readBytes += await _sslStream.ReadAsync(lengthArray, readBytes, count).ConfigureAwait(false);
+                    var readBytes = 0;
+
+                    do
+                    {
+                        var count = lengthArray.Length - readBytes;
+
+                        readBytes += await _sslStream.ReadAsync(lengthArray, readBytes, count, cancellationToken).ConfigureAwait(false);
+                    }
+                    while (readBytes < lengthArray.Length);
+
+                    Array.Reverse(lengthArray);
+
+                    var length = BitConverter.ToInt32(lengthArray, 0);
+
+                    if (length <= 0) continue;
+
+                    var data = new byte[length];
+
+                    readBytes = 0;
+
+                    do
+                    {
+                        var count = data.Length - readBytes;
+
+                        readBytes += await _sslStream.ReadAsync(data, readBytes, count, cancellationToken).ConfigureAwait(false);
+                    }
+                    while (readBytes < length);
+
+                    var message = ProtoMessage.Parser.ParseFrom(data);
+
+                    OnNext(message);
                 }
-                while (readBytes < lengthArray.Length);
-
-                Array.Reverse(lengthArray);
-
-                var length = BitConverter.ToInt32(lengthArray, 0);
-
-                if (length <= 0) return null;
-
-                var data = new byte[length];
-
-                readBytes = 0;
-
-                do
-                {
-                    var count = data.Length - readBytes;
-
-                    readBytes += await _sslStream.ReadAsync(data, readBytes, count).ConfigureAwait(false);
-                }
-                while (readBytes < length);
-
-                return ProtoMessage.Parser.ParseFrom(data);
+            }
+            catch (TaskCanceledException)
+            {
             }
             catch (Exception ex)
             {
@@ -392,8 +409,6 @@ namespace OpenAPI.Net
 
                 OnError(readException);
             }
-
-            return null;
         }
 
         /// <summary>
@@ -442,7 +457,7 @@ namespace OpenAPI.Net
         }
 
         /// <summary>
-        /// Removes the disposed ovserver from client observers collection
+        /// Removes the disposed observer from client observers collection
         /// </summary>
         /// <param name="observer"></param>
         private void OnObserverDispose(IObserver<IMessage> observer)
@@ -497,6 +512,8 @@ namespace OpenAPI.Net
                 {
                 }
             }
+
+            _observers.Clear();
         }
 
         /// <summary>
