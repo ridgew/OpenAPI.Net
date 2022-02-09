@@ -38,6 +38,10 @@ After you created the client you have to call its Connect method:
     await client.Connect();
 ```
 
+If connection fails it will throw a ConnectionException, check the inner exception to get the actual exception that was thrown.
+
+If you call a disposed client Connect method it will throw a ObjectDisposedException.
+
 Now client is connected to API server and you can send/receive messages.
 
 The OpenClient (IOpenClient) implements IDisposable, so you can use it on a C# "using" block like file streams.
@@ -84,6 +88,10 @@ You have to provide the message payload type, you can use "ProtoOAPayloadType" o
 The last parameter of "SendMessage" method is client message ID, you don't have to pass it as the client message ID is optional, this message will be returned back on response.
 
 All open API messages have their own classes, just create an object of message class and send it.
+
+There are other SendMessage method overloads that you can use, all send message methods put your message on the messages queue channel.
+
+To send a message instantly you can use the SendMessageInstant method. 
 
 # Receiving Messages
 
@@ -138,17 +146,17 @@ Now client will call and pass the exception to your OnError, also if your OnErro
 
 If you try to dispose a terminated client nothing will happen.
 
-Client most probably will throw one of these exceptions types:
+Client most probably will throw one of these exception types:
 
-* ReadException: This exception type will be thrown if something went wrong during reading of client TCP stream
+* ReceiveException: This exception type will be thrown if something went wrong while receiving data
 * ObserverException: This exception will be thrown if something went wrong during an observer (subscriber) OnNext method call, you can get the observer object via its Observer property
 
 Check the above exceptions "InnerException" property to get the actual exception.
 
 During call to any of client "SendMessage" methods you can expect one of these exceptions:
 
-* WriteException: This exception will be thrown if something went wrong during writing on client TCP stream, check the innerExceptio for gettign the actual exception
-* ObjectDisposedException: If you call send message of a disposed client then it will throw this excpetion
+* SendException: This exception will be thrown if something went wrong while sending data
+* ObjectDisposedException: If you call send message of a disposed client then it will throw this exception
 
 # Disposing Client
 
@@ -159,3 +167,5 @@ To avoid calling dispose method several times you can check the client IsDispose
 If a client got terminated by an exception and it called the OnError of observers then it will dispose itself and you don't have to call the dispose method inside your OnError handler.
 
 If the client is disposed without termination then it will call the observers OnCompleted handler.
+
+If you got a ConnectionException during the call on client Connect method then the client is already disposed, you don't have to call it's dispose method and you can't use that client instance anymore.
