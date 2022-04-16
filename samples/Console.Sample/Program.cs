@@ -18,7 +18,7 @@ namespace ConsoleDemo
 
         private static OpenClient _client;
 
-        private static readonly List<IDisposable> _disposables = new List<IDisposable>();
+        private static readonly List<IDisposable> _disposables = new();
 
         private static async Task Main()
         {
@@ -103,7 +103,6 @@ namespace ConsoleDemo
                 ShowDashLine();
 
                 Console.WriteLine($"Access token generated: {_token.AccessToken}");
-
             }
 
             var host = ApiInfo.GetHost(mode);
@@ -192,6 +191,7 @@ namespace ConsoleDemo
                         Console.WriteLine("For getting an account symbols list type (Requires account authorization): symbolslist {Account ID}\n");
                         Console.WriteLine("For subscribing to symbol(s) spot quotes type (Requires account authorization): subscribe spot {Account ID} {Symbol ID,}\n");
                         Console.WriteLine("For subscribing to symbol(s) trend bar type (Requires account authorization and spot subscription): subscribe trendbar {Period} {Account ID} {Symbol ID}\n");
+                        Console.WriteLine("For getting trend bar data: trendbar {Period} {Account ID} {Symbol ID} {numberOfDays}\n");
                         Console.WriteLine("For trend bar period parameter, you can use these values:\n");
 
                         var trendbars = Enum.GetValues(typeof(ProtoOATrendbarPeriod)).Cast<ProtoOATrendbarPeriod>();
@@ -237,6 +237,10 @@ namespace ConsoleDemo
 
                     case "subscribe":
                         ProcessSubscriptionCommand(commandSplit);
+                        break;
+
+                    case "trendbar":
+                        TrendbarRequest(commandSplit);
                         break;
 
                     case "tickdata":
@@ -298,6 +302,13 @@ namespace ConsoleDemo
 
         private static async void RefreshToken()
         {
+            if (string.IsNullOrWhiteSpace(_token.RefreshToken))
+            {
+                Console.Write("Refresh Token: ");
+
+                _token.RefreshToken = Console.ReadLine();
+            }
+
             Console.WriteLine("Sending ProtoOARefreshTokenReq...");
 
             var request = new ProtoOARefreshTokenReq
@@ -413,6 +424,30 @@ namespace ConsoleDemo
                 ToTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 Type = type
             };
+
+            await _client.SendMessage(request);
+        }
+
+        private static async void TrendbarRequest(string[] commandSplit)
+        {
+            var period = (ProtoOATrendbarPeriod)Enum.Parse(typeof(ProtoOATrendbarPeriod), commandSplit[1], true);
+            var accountId = long.Parse(commandSplit[2]);
+            var symbolId = long.Parse(commandSplit[3]);
+
+            var days = long.Parse(commandSplit[4]);
+
+            Console.WriteLine("Sending ProtoOAGetTrendbarsReq...");
+
+            var request = new ProtoOAGetTrendbarsReq
+            {
+                CtidTraderAccountId = accountId,
+                SymbolId = symbolId,
+                Period = period,
+                FromTimestamp = DateTimeOffset.UtcNow.AddDays(-days).ToUnixTimeMilliseconds(),
+                ToTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            };
+
+            Console.WriteLine($"FromTimestamp: {request.FromTimestamp} | ToTimestamp: {request.ToTimestamp}");
 
             await _client.SendMessage(request);
         }

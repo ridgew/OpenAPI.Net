@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Websocket.Client;
 using System.Net.WebSockets;
 using System.Threading.Channels;
+using System.Buffers;
 
 namespace OpenAPI.Net
 {
@@ -20,13 +21,13 @@ namespace OpenAPI.Net
     {
         private readonly TimeSpan _heartbeatInerval;
 
-        private readonly ProtoHeartbeatEvent _heartbeatEvent = new ProtoHeartbeatEvent();
+        private readonly ProtoHeartbeatEvent _heartbeatEvent = new();
 
         private readonly Channel<ProtoMessage> _messagesChannel = Channel.CreateUnbounded<ProtoMessage>();
 
-        private readonly ConcurrentDictionary<int, IObserver<IMessage>> _observers = new ConcurrentDictionary<int, IObserver<IMessage>>();
+        private readonly ConcurrentDictionary<int, IObserver<IMessage>> _observers = new();
 
-        private readonly CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
+        private readonly CancellationTokenSource _cancellationTokenSource = new();
 
         private readonly TimeSpan _requestDelay;
 
@@ -42,7 +43,6 @@ namespace OpenAPI.Net
 
         private IDisposable _webSocketMessageReceivedDisposable;
 
-
         /// <summary>
         /// Creates an instance of OpenClient which is not connected yet
         /// </summary>
@@ -55,7 +55,7 @@ namespace OpenAPI.Net
         {
             Host = host ?? throw new ArgumentNullException(nameof(host));
 
-            if (port < 0 || port > 65535) throw new ArgumentOutOfRangeException(nameof(port));
+            if (port is < 0 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
 
             Port = port;
 
@@ -81,7 +81,7 @@ namespace OpenAPI.Net
         public int MaxRequestPerSecond { get; }
 
         /// <summary>
-        /// If client is connected via websocket then this will return True, otherwise False
+        /// If client is connected via Websocket then this will return True, otherwise False
         /// </summary>
         public bool IsUsingWebSocket { get; }
 
@@ -111,7 +111,7 @@ namespace OpenAPI.Net
         public int MessagesQueueCount { get; private set; }
 
         /// <summary>
-        /// Connects to the API based on you specified method (websocket or TCP)
+        /// Connects to the API based on you specified method (Websocket or TCP)
         /// </summary>
         /// <exception cref="ObjectDisposedException">If client is disposed</exception>
         /// <exception cref="ConnectionException">If connection attempt fails, the client will be disposed and this exception will be thrown</exception>
@@ -136,7 +136,7 @@ namespace OpenAPI.Net
                 _heartbeatDisposable = Observable.Interval(_heartbeatInerval).DoWhile(() => !IsDisposed)
                     .Subscribe(x => SendHeartbeat());
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
                 var connectionException = new ConnectionException(ex);
 
@@ -154,9 +154,11 @@ namespace OpenAPI.Net
         {
             ThrowObjectDisposedExceptionIfDisposed();
 
-            _observers.AddOrUpdate(observer.GetHashCode(), observer, (key, oldObserver) => observer);
+            var observerHashCode = observer.GetHashCode();
 
-            return Disposable.Create(() => OnObserverDispose(observer));
+            _ = _observers.AddOrUpdate(observerHashCode, observer, (key, oldObserver) => observer);
+
+            return Disposable.Create(() => OnObserverDispose(observerHashCode));
         }
 
         /// <summary>
@@ -169,11 +171,10 @@ namespace OpenAPI.Net
         /// <param name="clientMsgId">The client message ID (optional)</param>
         /// <exception cref="InvalidOperationException">If getting message payload type fails</exception>
         /// <returns>Task</returns>
-        public async Task SendMessage<T>(T message, string clientMsgId = null) where T :
-            IMessage
+        public async Task SendMessage<T>(T message, string clientMsgId = null) where T : IMessage
         {
             var protoMessage = MessageFactory.GetMessage(message.GetPayloadType(), message.ToByteString(), clientMsgId);
-            
+
             await SendMessage(protoMessage);
         }
 
@@ -185,8 +186,7 @@ namespace OpenAPI.Net
         /// <param name="payloadType">Message Payload Type (ProtoPayloadType)</param>
         /// <param name="clientMsgId">The client message ID (optional)</param>
         /// <returns>Task</returns>
-        public async Task SendMessage<T>(T message, ProtoPayloadType payloadType, string clientMsgId = null) where T :
-            IMessage
+        public async Task SendMessage<T>(T message, ProtoPayloadType payloadType, string clientMsgId = null) where T : IMessage
         {
             var protoMessage = MessageFactory.GetMessage(message, payloadType, clientMsgId);
 
@@ -201,8 +201,7 @@ namespace OpenAPI.Net
         /// <param name="payloadType">Message Payload Type (ProtoOAPayloadType)</param>
         /// <param name="clientMsgId">The client message ID (optional)</param>
         /// <returns>Task</returns>
-        public async Task SendMessage<T>(T message, ProtoOAPayloadType payloadType, string clientMsgId = null) where T :
-            IMessage
+        public async Task SendMessage<T>(T message, ProtoOAPayloadType payloadType, string clientMsgId = null) where T : IMessage
         {
             var protoMessage = MessageFactory.GetMessage(message, payloadType, clientMsgId);
 
@@ -270,7 +269,7 @@ namespace OpenAPI.Net
 
             _cancellationTokenSource.Cancel();
 
-            _messagesChannel.Writer.TryComplete();
+            _ = _messagesChannel.Writer.TryComplete();
 
             _cancellationTokenSource.Dispose();
 
@@ -294,7 +293,7 @@ namespace OpenAPI.Net
         }
 
         /// <summary>
-        /// Connects to API by using websocket
+        /// Connects to API by using Websocket
         /// </summary>
         /// <returns>Task</returns>
         private async Task ConnectWebScoket()
@@ -379,58 +378,72 @@ namespace OpenAPI.Net
         /// <returns>Task</returns>
         private async void ReadTcp(CancellationToken cancellationToken)
         {
+            var dataLength = new byte[4];
+            byte[] data = null;
+
             try
             {
                 while (!IsDisposed)
                 {
-                    var lengthArray = new byte[sizeof(int)];
-
                     var readBytes = 0;
 
                     do
                     {
-                        var count = lengthArray.Length - readBytes;
+                        var count = dataLength.Length - readBytes;
 
-                        readBytes += await _sslStream.ReadAsync(lengthArray, readBytes, count, cancellationToken).ConfigureAwait(false);
+                        readBytes += await _sslStream.ReadAsync(dataLength, readBytes, count, cancellationToken).ConfigureAwait(false);
 
-                        if (readBytes == 0) new InvalidOperationException("Remote host closed the connection");
+                        if (readBytes == 0) throw new InvalidOperationException("Remote host closed the connection");
                     }
-                    while (readBytes < lengthArray.Length);
+                    while (readBytes < dataLength.Length);
 
-                    Array.Reverse(lengthArray);
-
-                    var length = BitConverter.ToInt32(lengthArray, 0);
+                    var length = GetLength(dataLength);
 
                     if (length <= 0) continue;
 
-                    var data = new byte[length];
+                    data = ArrayPool<byte>.Shared.Rent(length);
 
                     readBytes = 0;
 
                     do
                     {
-                        var count = data.Length - readBytes;
+                        var count = length - readBytes;
 
                         readBytes += await _sslStream.ReadAsync(data, readBytes, count, cancellationToken).ConfigureAwait(false);
 
-                        if (readBytes == 0) new InvalidOperationException("Remote host closed the connection");
+                        if (readBytes == 0) throw new InvalidOperationException("Remote host closed the connection");
                     }
                     while (readBytes < length);
 
-                    var message = ProtoMessage.Parser.ParseFrom(data);
+                    var message = ProtoMessage.Parser.ParseFrom(data, 0, length);
+
+                    ArrayPool<byte>.Shared.Return(data);
 
                     OnNext(message);
                 }
             }
-            catch (Exception ex) when (ex is OperationCanceledException)
-            {
-            }
             catch (Exception ex)
             {
+                if (data is not null) ArrayPool<byte>.Shared.Return(data);
+
                 var exception = new ReceiveException(ex);
 
                 OnError(exception);
             }
+        }
+
+        /// <summary>
+        /// Returns the length of a received message without causing extra allocation
+        /// </summary>
+        /// <param name="lengthBytes">The byte array of received length data</param>
+        /// <returns>int</returns>
+        private int GetLength(byte[] lengthBytes)
+        {
+            var lengthSpan = lengthBytes.AsSpan();
+
+            lengthSpan.Reverse();
+
+            return BitConverter.ToInt32(lengthSpan);
         }
 
         /// <summary>
@@ -457,7 +470,14 @@ namespace OpenAPI.Net
         {
             if (IsDisposed || DateTimeOffset.Now - LastSentMessageTime < _heartbeatInerval) return;
 
-            await SendMessage(_heartbeatEvent, ProtoPayloadType.HeartbeatEvent).ConfigureAwait(false);
+            try
+            {
+                await SendMessage(_heartbeatEvent, ProtoPayloadType.HeartbeatEvent).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                OnError(ex);
+            }
         }
 
         /// <summary>
@@ -474,10 +494,10 @@ namespace OpenAPI.Net
         /// <summary>
         /// Removes the disposed observer from client observers collection
         /// </summary>
-        /// <param name="observer"></param>
-        private void OnObserverDispose(IObserver<IMessage> observer)
+        /// <param name="observerKey">The observer hash code key</param>
+        private void OnObserverDispose(int observerKey)
         {
-            _observers.TryRemove(observer.GetHashCode(), out _);
+            _ = _observers.TryRemove(observerKey, out _);
         }
 
         /// <summary>
